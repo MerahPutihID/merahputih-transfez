@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  api:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: merahputih-transfez-api-smrt:latest
+    container_name: merahputih-transfez-api-smrt
+    ports:
+      - "8083:8083"
+    environment:
+      - APP_ENV=development-smart-route
+      - MODE=api
+      - DATABASE_URL=postgresql://dm_user:dm_user@db_postgres:5432/dev_app_bmps
+    env_file:
+      - .env-smart-route
+    volumes:
+      - ./app:/app/app
+    networks:
+      - app_bmps_service_default
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "5"
+        max-size: "10m"
+
+  scheduler:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: merahputih-transfez-scheduler-smrt:latest
+    container_name: merahputih-transfez-scheduler-smrt
+    environment:
+      - APP_ENV=development-smart-route
+      - MODE=scheduler
+      - DATABASE_URL=postgresql://dm_user:dm_user@db_postgres:5432/dev_app_bmps
+    env_file:
+      - .env-smart-route
+    volumes:
+      - ./app:/app/app
+    networks:
+      - app_bmps_service_default
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "5"
+        max-size: "10m"
+
+networks:
+  app_bmps_service_default:
+    name: app_bmps_service_default
+    driver: bridge
+    external: true
