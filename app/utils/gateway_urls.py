@@ -11,18 +11,26 @@ VA_CALLBACK_PATH = "/va/callback"
 
 def build_va_callback_url(
     explicit_callback_url: Optional[str] = None,
-    virtual_account: Optional[str] = None,
+    partner_trx_id: Optional[str] = None,
 ) -> str:
     """
     Resolve callback URL for create VA.
 
     Priority:
     1. explicit_callback_url from request body
-    2. GATEWAY_PUBLIC_URL + /va/callback/{virtual_account} from .env (if virtual_account provided)
-    3. GATEWAY_PUBLIC_URL + /va/callback from .env
+    2. GATEWAY_PUBLIC_URL + /va/callback/{partner_trx_id} from .env
     """
     if explicit_callback_url and explicit_callback_url.strip():
         return explicit_callback_url.strip()
+
+    if not partner_trx_id or not str(partner_trx_id).strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "partner_trx_id is required when callback_url is omitted, "
+                "or provide callback_url explicitly in request body"
+            ),
+        )
 
     base = settings.GATEWAY_PUBLIC_URL
     if not base or not str(base).strip():
@@ -34,7 +42,4 @@ def build_va_callback_url(
             ),
         )
 
-    base_url = f"{str(base).rstrip('/')}{VA_CALLBACK_PATH}"
-    if virtual_account and str(virtual_account).strip():
-        return f"{base_url}/{str(virtual_account).strip()}"
-    return base_url
+    return f"{str(base).rstrip('/')}{VA_CALLBACK_PATH}/{str(partner_trx_id).strip()}"

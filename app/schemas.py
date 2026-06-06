@@ -92,11 +92,11 @@ class CreateVARequest(BaseModel):
         default=None,
         description=(
             "URL where Transfez sends VA callbacks. "
-            "If omitted, uses GATEWAY_PUBLIC_URL from .env + /va/callback/{virtual_account} "
-            "when virtual_account is provided, otherwise + /va/callback. "
+            "If omitted, uses GATEWAY_PUBLIC_URL from .env + /va/callback/{partner_trx_id}. "
+            "partner_trx_id must be provided when callback_url is omitted. "
             "(NOT API_BASE_URL — that is for remittance transaction callbacks)."
         ),
-        examples=["http://localhost:8001/va/callback/746100000000007"],
+        examples=["http://localhost:8001/va/callback/251014-0001"],
     )
 
 

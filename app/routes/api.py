@@ -35,7 +35,7 @@ def create_va(payload: CreateVARequest):
     request_data = payload.model_dump(exclude_none=True)
     request_data["callback_url"] = build_va_callback_url(
         payload.callback_url,
-        payload.virtual_account,
+        payload.partner_trx_id,
     )
     response = create_virtual_account(request_data)
 
@@ -55,10 +55,10 @@ def create_va(payload: CreateVARequest):
     )
 
 
-@router.post("/va/callback/{va_number}", response_model=VACallbackResponse)
+@router.post("/va/callback/{partner_trx_id}", response_model=VACallbackResponse)
 async def handle_va_callback(
     request: Request,
-    va_number: str = Path(..., description="VA number from callback URL"),
+    partner_trx_id: str = Path(..., description="Partner transaction ID from callback URL"),
     db: Session = Depends(get_db),
 ):
     """Receive Transfez VA callbacks; persist to cdt_va_callback_log; return 200."""
@@ -71,20 +71,23 @@ async def handle_va_callback(
         raise HTTPException(status_code=400, detail="Callback body must be a JSON object")
 
     logger.info(
-        "Received VA callback: %s",
+        "Received VA callback for partner_trx_id=%s: %s",
+        partner_trx_id,
         json.dumps(raw_body, indent=2),
     )
 
     parsed = parse_va_callback_payload(raw_body)
-    payload_va_number = parsed.get("va_number")
-    if payload_va_number and str(payload_va_number) != va_number:
+    payload_partner_trx_id = parsed.get("partner_trx_id")
+    if payload_partner_trx_id and str(payload_partner_trx_id) != partner_trx_id:
         logger.warning(
             "VA callback URL and payload mismatch: url=%s payload=%s",
-            va_number,
-            payload_va_number,
+            partner_trx_id,
+            payload_partner_trx_id,
         )
 
-    resolved_va_number = str(payload_va_number) if payload_va_number else va_number
+    resolved_partner_trx_id = (
+        str(payload_partner_trx_id) if payload_partner_trx_id else partner_trx_id
+    )
     success_value = parsed.get("success")
     if success_value is not None and not isinstance(success_value, str):
         success_value = str(success_value)
@@ -93,8 +96,8 @@ async def handle_va_callback(
         transfez_id=parsed.get("transfez_id"),
         va_number_id=parsed.get("va_number_id"),
         va_status=parsed.get("va_status"),
-        va_number=resolved_va_number,
-        partner_trx_id=parsed.get("partner_trx_id"),
+        va_number=parsed.get("va_number"),
+        partner_trx_id=resolved_partner_trx_id,
         bank_code=parsed.get("bank_code"),
         amount=parsed.get("amount"),
         amount_detected=parsed.get("amount_detected"),

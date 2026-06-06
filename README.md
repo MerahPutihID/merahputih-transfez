@@ -117,7 +117,7 @@ COMPLIANCE_PURPOSE_OF_REMITTANCES=FAMILY_SUPPORT
 | `SQLALCHEMY_POOL_SIZE` | Connection pool size | No | 5 |
 | `SQLALCHEMY_POOL_TIMEOUT` | Connection timeout in seconds | No | 30 |
 | `API_BASE_URL` | Base URL for **remittance** callbacks (scheduler → BMP transaction service, e.g. `.../transaction/callback/{id}`) | Yes | None |
-| `GATEWAY_PUBLIC_URL` | Public base URL of **this** merahputih-transfez app (VA callback → `{GATEWAY_PUBLIC_URL}/va/callback`) | No | None |
+| `GATEWAY_PUBLIC_URL` | Public base URL of **this** merahputih-transfez app (VA callback → `{GATEWAY_PUBLIC_URL}/va/callback/{partner_trx_id}`) | No | None |
 | `THIRD_PARTY_API_URL` | Third-party API base URL | Yes | None |
 | `THIRD_PARTY_API_KEY` | API key for authentication | Yes | None |
 | `BALANCE_ID` | Balance ID for transactions | Yes | None |
