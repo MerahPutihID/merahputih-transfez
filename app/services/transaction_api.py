@@ -183,7 +183,7 @@ def create_transaction(
             "beneficiary_relationship": settings.COMPLIANCE_BENEFICIARY_RELATIONSHIPS,
             "purpose_of_remittance": settings.COMPLIANCE_PURPOSE_OF_REMITTANCES
         },
-        "notes": notes or settings.NOTES
+        "notes": notes if notes is not None else settings.NOTES
     }
 
     try:
