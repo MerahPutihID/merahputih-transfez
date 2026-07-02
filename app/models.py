@@ -161,6 +161,18 @@ class MerchantVirtualAccount(Base):
     va_number = Column(String(50))
 
 
+class MachineVirtualAccount(Base):
+    """Reference model for public.cdt_machine_virtual_account (managed by Portal)."""
+
+    __tablename__ = "cdt_machine_virtual_account"
+    __table_args__ = {"schema": "public", "extend_existing": True}
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    machine_id = Column(UUID(as_uuid=True), index=True)
+    machine_code = Column(String(50))
+    va_number = Column(String(50))
+
+
 class Bank(Base):
     __tablename__ = "cdt_bank"
     __table_args__ = {'extend_existing': True}
@@ -204,6 +216,36 @@ class CDTAdvTransaction(Base):
         uselist=False,
         viewonly=True
     )
+
+class BijakTransaction(Base):
+    """Reference model for cdt_bijak_transaction (managed by Bijak service)."""
+
+    __tablename__ = "cdt_bijak_transaction"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(Integer, primary_key=True, index=True)
+    reference_id = Column(String(255), unique=True, index=True)
+    transaction_type = Column(String(50), nullable=False)
+    amount = Column(Float, nullable=False)
+    denomination_details = Column(JSON, nullable=True)
+    status = Column(String(50), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    request_data = Column(JSON, nullable=True)
+    response_data = Column(JSON, nullable=True)
+    http_request = Column(JSON, nullable=True)
+    http_response = Column(JSON, nullable=True)
+    error_message = Column(String(255), nullable=True)
+    retry_count = Column(Integer, nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    transaction_detail = relationship(
+        "TransactionDetail",
+        primaryjoin="BijakTransaction.reference_id == foreign(TransactionDetail.cdm_trx_no)",
+        uselist=False,
+        viewonly=True,
+    )
+
 
 class PjpurTagTransaction(Base):
     __tablename__ = "pjpur_tag_transactions"

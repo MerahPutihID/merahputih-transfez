@@ -29,6 +29,10 @@ class BaseConfig(BaseSettings):
 
     # Queue processing settings
     QUEUE_PROCESSING_TIME_THRESHOLD_HOURS: int = 6
+    # NAK queue (cdt_nak_trx) — existing flow, enabled by default.
+    ENABLE_NAK_QUEUE_PROCESSING: bool = True
+    # Bijak COMPLETED deposit → local transfer (additional trigger for PJPUR Bijak machines).
+    ENABLE_BIJAK_TRANSFER_PROCESSING: bool = True
     
     # Machine Filter Configuration
     MAINTENANCE_ID: str  # REQUIRED: Filter transactions by specific maintenance_id

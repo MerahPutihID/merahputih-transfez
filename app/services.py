@@ -145,10 +145,14 @@ def create_transaction(
     destination: dict,
     beneficiary: dict,
     notes: Optional[str] = None,
+    include_balance_and_transfer_service: bool = True,
 ) -> Dict[str, Any]:
     """
     Send request to 3rd-party API with detailed transaction information.
     Uses API Key authentication in Authorization header.
+
+    For Bijak transfers, set include_balance_and_transfer_service=False to omit
+    balance_id and source.transfer_service_code (not used by Transfez for Bijak).
     """
     url = f"{settings.THIRD_PARTY_API_URL}/transactions"
     
@@ -163,7 +167,6 @@ def create_transaction(
         "reference_id": reference_id,
         "callback_url": callback_url,
         "payer_id": payer_id,
-        # "balance_id": int(settings.BALANCE_ID),  # Convert to integer => not used based on information from jack
         "mode": "DESTINATION",
         "sender": {
             "firstname": settings.SENDER_FIRSTNAME,
@@ -174,7 +177,6 @@ def create_transaction(
             "amount": destination["amount"],
             "currency": "IDR",
             "country_iso_code": settings.SENDER_COUNTRY_ISO_CODE,
-            # "transfer_service_code": settings.TRANSFER_SERVICE_CODE => not used based on information from jack
         },
         "destination": destination,
         "beneficiary": beneficiary,
@@ -185,6 +187,10 @@ def create_transaction(
         },
         "notes": notes or settings.NOTES
     }
+
+    if include_balance_and_transfer_service:
+        payload["balance_id"] = int(settings.BALANCE_ID)
+        payload["source"]["transfer_service_code"] = settings.TRANSFER_SERVICE_CODE
 
     try:
         # Log request details before sending

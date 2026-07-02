@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  api:
+    image: merahputih-transfez-api:latest
+    container_name: merahputih-transfez-api
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8083}:8083"
+    environment:
+      - APP_ENV=production
+      - MODE=api
+      - PORT=8083
+    env_file:
+      - .env
+    networks:
+      - transfez-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-file: "5"
+        max-size: "10m"
+
+  scheduler:
+    image: merahputih-transfez-scheduler:latest
+    container_name: merahputih-transfez-scheduler
+    restart: unless-stopped
+    environment:
+      - APP_ENV=production
+      - MODE=scheduler
+      - PORT=8083
+    env_file:
+      - .env
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - transfez-network
+    logging:
+      driver: json-file
+      options:
+        max-file: "5"
+        max-size: "10m"
+
+networks:
+  transfez-network:
+    driver: bridge

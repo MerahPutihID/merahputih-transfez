@@ -7,14 +7,25 @@ from sqlalchemy import cast, String, desc
 from datetime import datetime, timedelta
 
 from app.database import get_db
-from app.models import Queue, Transaction, TransactionDetail, Log, BeneficiaryAccount, Bank, CDTAdvTransaction, PjpurTagTransaction, CDTMachine
+from app.models import (
+    Queue,
+    Transaction,
+    TransactionDetail,
+    Log,
+    BeneficiaryAccount,
+    Bank,
+    CDTAdvTransaction,
+    BijakTransaction,
+    PjpurTagTransaction,
+    CDTMachine,
+)
 from app.services import create_transaction, confirm_transaction  # Import the functions directly
 from app.utils import UUIDEncoder
 from app.utils import calculate_transaction_fee  # Import the function directly
 from app.constants import TRANSACTION_STATUS
 from app.config import settings
 from app.utils.transaction_splitter import prepare_split_transactions, generate_split_reference_ids
-from app.utils.va_lookup import get_va_number_for_beneficiary
+from app.utils.va_lookup import get_va_number_by_machine_id
 
 # Configure logging
 logging.basicConfig(
@@ -75,7 +86,15 @@ def get_allowed_machine_ids(db):
         logger.error(f"Error getting machine IDs for maintenance_id {settings.MAINTENANCE_ID}: {str(e)}")
         raise ValueError(f"Failed to get machine IDs for maintenance_id {settings.MAINTENANCE_ID}: {str(e)}")
 
-def _process_transaction_common(db, trx_detail, transaction_id, reference_id, log_prefix="", item_id=None):
+def _process_transaction_common(
+    db,
+    trx_detail,
+    transaction_id,
+    reference_id,
+    log_prefix="",
+    item_id=None,
+    attach_va_to_notes=False,
+):
     """Common transaction processing logic used by both queue and advanced transaction processors.
     
     This function:
@@ -97,6 +116,8 @@ def _process_transaction_common(db, trx_detail, transaction_id, reference_id, lo
         reference_id: Reference ID for the transaction
         log_prefix: Prefix for log messages (default: "")
         item_id: Optional item ID for logging purposes
+        attach_va_to_notes: Bijak flow only — attach machine VA to notes and omit
+            balance_id / transfer_service_code from Transfez payload.
         
     Returns:
         bool: True if processing was successful, False otherwise
@@ -152,22 +173,25 @@ def _process_transaction_common(db, trx_detail, transaction_id, reference_id, lo
         if not bank_data.bank_payer_id:
             raise ValueError(f"Bank payer ID not configured for bank: {bank_data.name}")
 
-        va_number = get_va_number_for_beneficiary(db, beneficiary_data.id)
-        transaction_notes = va_number or settings.NOTES
-        if va_number:
-            logger.info(
-                "%sUsing VA number for Transfez notes: %s (beneficiary_id=%s)",
-                log_prefix,
-                va_number,
-                beneficiary_data.id,
-            )
+        if attach_va_to_notes:
+            va_number = get_va_number_by_machine_id(db, trx_detail.machine_id)
+            transaction_notes = va_number or settings.NOTES
+            if va_number:
+                logger.info(
+                    "%sUsing VA number for Transfez notes: %s (machine_id=%s)",
+                    log_prefix,
+                    va_number,
+                    trx_detail.machine_id,
+                )
+            else:
+                logger.warning(
+                    "%sVA not found for machine_id=%s; using default NOTES",
+                    log_prefix,
+                    trx_detail.machine_id,
+                )
         else:
-            logger.warning(
-                "%sVA not found for beneficiary_id=%s customer_id=%s; using default NOTES",
-                log_prefix,
-                beneficiary_data.id,
-                beneficiary_data.customer_id,
-            )
+            transaction_notes = settings.NOTES
+            logger.debug("%sUsing default NOTES (no VA attachment)", log_prefix)
             
         # Get the transaction amount
         try:
@@ -322,6 +346,7 @@ def _process_transaction_common(db, trx_detail, transaction_id, reference_id, lo
                 },
                 beneficiary=split_tx['beneficiary'],
                 notes=transaction_notes,
+                include_balance_and_transfer_service=not attach_va_to_notes,
             )
 
             # Update the log amount fields only for splits without fee applied
@@ -551,6 +576,67 @@ def process_adv_transactions():
         logger.info("Advanced Transaction processing completed. Processed %s items in %.2f seconds", processed_count, duration)
         db.close()
 
+def process_bijak_transactions():
+    """Process local transfer after Bijak deposit API returns COMPLETED."""
+    start_time = datetime.now()
+    db = next(get_db())
+    logger.info("Processing Bijak Transactions at %s", start_time)
+    processed_count = 0
+    try:
+        hour_ago = datetime.now() - timedelta(hours=settings.QUEUE_PROCESSING_TIME_THRESHOLD_HOURS)
+
+        try:
+            allowed_machine_ids = get_allowed_machine_ids(db)
+        except ValueError as e:
+            logger.error("Bijak transaction processing skipped: %s", e)
+            return
+
+        if not allowed_machine_ids:
+            logger.info("No machines found with configured maintenance_id - skipping Bijak processing")
+            return
+
+        pending_transactions = (
+            db.query(BijakTransaction, TransactionDetail)
+            .join(
+                TransactionDetail,
+                BijakTransaction.reference_id == TransactionDetail.cdm_trx_no,
+            )
+            .filter(BijakTransaction.status == "COMPLETED")
+            .filter(BijakTransaction.transaction_type == "DEPOSIT")
+            .filter(BijakTransaction.processed_at.isnot(None))
+            .filter(BijakTransaction.processed_at >= hour_ago)
+            .filter(TransactionDetail.machine_id.in_(allowed_machine_ids))
+            .filter(
+                ~db.query(Log)
+                .filter(Log.cdt_trx_cdm_id == TransactionDetail.id)
+                .exists()
+            )
+            .order_by(BijakTransaction.processed_at.desc().nullsfirst())
+        )
+
+        for bijak_transaction, trx_detail in pending_transactions:
+            reference_id = bijak_transaction.reference_id
+            if _process_transaction_common(
+                db,
+                trx_detail,
+                trx_detail.id,
+                reference_id,
+                "BIJAK ",
+                bijak_transaction.id,
+                attach_va_to_notes=True,
+            ):
+                processed_count += 1
+    finally:
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        logger.info(
+            "Bijak Transaction processing completed. Processed %s items in %.2f seconds",
+            processed_count,
+            duration,
+        )
+        db.close()
+
+
 def process_pjpur_tag_transactions():
     """Process pending transactions from PjpurTagTransaction."""
     start_time = datetime.now()
@@ -610,9 +696,17 @@ def process_pjpur_tag_transactions():
 def run_scheduler():
     """Run the background scheduler."""
     logger.info("Starting the scheduler...")
-    scheduler.add_job(process_queue, "interval", seconds=10)
-    scheduler.add_job(process_adv_transactions, "interval", seconds=10)  # Process adv transactions every 10 seconds
-    scheduler.add_job(process_pjpur_tag_transactions, "interval", seconds=10)  # Process PJPUR TAG transactions every 10 seconds
+    if settings.ENABLE_NAK_QUEUE_PROCESSING:
+        scheduler.add_job(process_queue, "interval", seconds=10)
+        logger.info("NAK queue processing enabled (cdt_nak_trx)")
+    else:
+        logger.info("NAK queue processing disabled — using Bijak COMPLETED deposits for local transfer")
+
+    if settings.ENABLE_BIJAK_TRANSFER_PROCESSING:
+        scheduler.add_job(process_bijak_transactions, "interval", seconds=10)
+
+    scheduler.add_job(process_adv_transactions, "interval", seconds=10)
+    scheduler.add_job(process_pjpur_tag_transactions, "interval", seconds=10)
     scheduler.start()
     try:
         while True:
