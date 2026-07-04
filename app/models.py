@@ -67,6 +67,7 @@ class Log(Base):
     deduction_amount = Column(Float, nullable=True)  # Transaction fee amount
     final_amount = Column(Float, nullable=True)  # Final amount after deduction
     amount = Column(Float, nullable=True)  # Original amount for this specific request to 3rd-party
+    retry_count = Column(Integer, nullable=True, default=0)  # Failed transfer retry attempts
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

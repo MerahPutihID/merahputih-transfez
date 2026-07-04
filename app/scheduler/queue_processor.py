@@ -3,7 +3,7 @@ import logging
 import string
 import random
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import cast, String, desc
+from sqlalchemy import cast, String, desc, or_, func
 from datetime import datetime, timedelta
 
 from app.database import get_db
@@ -86,6 +86,110 @@ def get_allowed_machine_ids(db):
         logger.error(f"Error getting machine IDs for maintenance_id {settings.MAINTENANCE_ID}: {str(e)}")
         raise ValueError(f"Failed to get machine IDs for maintenance_id {settings.MAINTENANCE_ID}: {str(e)}")
 
+
+def _parent_log_filter(cdt_trx_cdm_id_column):
+    """Parent gateway log rows (split_number 0 or unset)."""
+    return (
+        Log.cdt_trx_cdm_id == cdt_trx_cdm_id_column,
+        or_(Log.split_number == 0, Log.split_number.is_(None)),
+    )
+
+
+def is_transfer_eligible(db, cdt_trx_cdm_id_column):
+    """
+    SQLAlchemy expression: transaction has no gateway log yet, or has a FAILED parent
+    log that is eligible for automatic retry.
+    """
+    retry_cutoff = datetime.now() - timedelta(minutes=settings.TRANSFER_RETRY_INTERVAL_MINUTES)
+    parent_filters = _parent_log_filter(cdt_trx_cdm_id_column)
+
+    has_parent_log = db.query(Log.id).filter(*parent_filters).exists()
+
+    retryable_failed = (
+        db.query(Log.id)
+        .filter(
+            *parent_filters,
+            Log.status == TRANSACTION_STATUS["FAILED"],
+            func.coalesce(Log.retry_count, 0) < settings.MAX_TRANSFER_RETRY_COUNT,
+            Log.updated_at <= retry_cutoff,
+        )
+        .exists()
+    )
+
+    return or_(~has_parent_log, retryable_failed)
+
+
+def _prepare_transfer_log(db, transaction_id, reference_id, trx_detail, log_prefix=""):
+    """
+    Create a new parent log or reset an existing FAILED parent log for retry.
+    Returns the parent Log row to use for this attempt.
+    """
+    try:
+        initial_amount = float(trx_detail.amount)
+    except (ValueError, TypeError):
+        initial_amount = 0.0
+
+    existing_parent = (
+        db.query(Log)
+        .filter(
+            Log.cdt_trx_cdm_id == transaction_id,
+            or_(Log.split_number == 0, Log.split_number.is_(None)),
+            Log.status == TRANSACTION_STATUS["FAILED"],
+        )
+        .first()
+    )
+
+    if existing_parent:
+        retry_num = (existing_parent.retry_count or 0) + 1
+        db.query(Log).filter(
+            Log.parent_reference_id == reference_id,
+            Log.split_number > 0,
+        ).delete(synchronize_session=False)
+
+        existing_parent.retry_count = retry_num
+        existing_parent.status = TRANSACTION_STATUS["PENDING"]
+        existing_parent.state = None
+        existing_parent.transaction_id = None
+        existing_parent.create_request = None
+        existing_parent.confirm_response = None
+        existing_parent.callback_data = None
+        existing_parent.split_total = 0
+        existing_parent.create_response = (
+            f"{log_prefix}Retry {retry_num}/{settings.MAX_TRANSFER_RETRY_COUNT} initiated"
+        )
+        db.commit()
+        logger.info(
+            "%sRetrying failed transfer for reference_id=%s (attempt %s/%s)",
+            log_prefix,
+            reference_id,
+            retry_num,
+            settings.MAX_TRANSFER_RETRY_COUNT,
+        )
+        return existing_parent
+
+    processing_log = Log(
+        cdt_trx_cdm_id=transaction_id,
+        reference_id=reference_id,
+        transaction_id=None,
+        status=TRANSACTION_STATUS["PENDING"],
+        state=None,
+        create_response=f"{log_prefix}Transaction processing initiated".strip(),
+        confirm_response=None,
+        callback_data=None,
+        split_number=0,
+        split_total=0,
+        original_amount=initial_amount,
+        deduction_amount=0.0,
+        final_amount=0.0,
+        amount=initial_amount,
+        parent_reference_id=None,
+        retry_count=0,
+    )
+    db.add(processing_log)
+    db.commit()
+    return processing_log
+
+
 def _process_transaction_common(
     db,
     trx_detail,
@@ -124,35 +228,9 @@ def _process_transaction_common(
     """
     processing_log = None
     try:
-        # Initial log entry for processing
-        init_message = f"Transaction processing initiated{' (from CDT Advanced Transaction)' if log_prefix == 'ADV ' else ''}"
-        
-        # Safely get the transaction amount before creating the log
-        try:
-            initial_amount = float(trx_detail.amount)
-        except (ValueError, TypeError):
-            initial_amount = 0.0  # Safe default
-            
-        processing_log = Log(
-            cdt_trx_cdm_id=transaction_id,
-            reference_id=reference_id,
-            transaction_id=None,  # Will be set after successful creation
-            status=TRANSACTION_STATUS["PENDING"],
-            state=None,
-            create_response=init_message,
-            confirm_response=None,
-            callback_data=None,
-            # Initialize with split info, even though this will be updated later
-            split_number=0,  # Parent/initial log gets split_number 0
-            split_total=0,  # Will be updated after we know the total number of splits
-            original_amount=initial_amount,  # Initial amount from transaction detail
-            deduction_amount=0.0,  # Will be updated with actual fee
-            final_amount=0.0,  # Will be updated with final amount
-            amount=initial_amount,  # Initial amount from transaction detail
-            parent_reference_id=None  # This is the parent log itself
+        processing_log = _prepare_transfer_log(
+            db, transaction_id, reference_id, trx_detail, log_prefix
         )
-        db.add(processing_log)
-        db.commit()
 
         # Fetch beneficiary data
         beneficiary_data = db.query(BeneficiaryAccount).filter(
@@ -451,10 +529,11 @@ def _process_transaction_common(
                 deduction_amount=0.0,  # Set default values for fee fields as float
                 final_amount=0.0,
                 amount=safe_amount,  # Use safe amount value
-                split_number=0,  # Parent log gets split_number 0
-                split_total=0,  # No splits in error case
-                original_amount=safe_amount,  # Use safe amount value
-                parent_reference_id=None  # This is the parent log
+                split_number=0,
+                split_total=0,
+                original_amount=safe_amount,
+                parent_reference_id=None,
+                retry_count=0,
             )
             db.add(processing_log)
         db.commit()
@@ -500,11 +579,7 @@ def process_queue():
             .filter(Queue.status == "SUCCESS")
             .filter(TransactionDetail.updated_on >= hour_ago)  # Add time filter
             .filter(TransactionDetail.machine_id.in_(allowed_machine_ids))  # Apply machine filter
-            .filter(
-                ~db.query(Log)
-                .filter(Log.cdt_trx_cdm_id == Transaction.id)
-                .exists()
-            )  # More efficient check for large Log tables
+            .filter(is_transfer_eligible(db, TransactionDetail.id))
             .order_by(TransactionDetail.updated_on.desc()) # Order by updated_on descending
             # .limit(1)  # Limit to 1 transactions for processing
         )
@@ -557,11 +632,7 @@ def process_adv_transactions():
                 # ((CDTAdvTransaction.processed_at == None) & (CDTAdvTransaction.created_at != None) & (CDTAdvTransaction.created_at >= hour_ago))
             )
             .filter(TransactionDetail.machine_id.in_(allowed_machine_ids))  # Apply machine filter
-            .filter(
-                ~db.query(Log)
-                .filter(Log.cdt_trx_cdm_id == TransactionDetail.id)
-                .exists()
-            )  # More efficient check for large Log tables
+            .filter(is_transfer_eligible(db, TransactionDetail.id))
             .order_by(CDTAdvTransaction.processed_at.desc().nullsfirst())  # Order by processed_at descending, nulls first
         )
         
@@ -606,11 +677,7 @@ def process_bijak_transactions():
             .filter(BijakTransaction.processed_at.isnot(None))
             .filter(BijakTransaction.processed_at >= hour_ago)
             .filter(TransactionDetail.machine_id.in_(allowed_machine_ids))
-            .filter(
-                ~db.query(Log)
-                .filter(Log.cdt_trx_cdm_id == TransactionDetail.id)
-                .exists()
-            )
+            .filter(is_transfer_eligible(db, TransactionDetail.id))
             .order_by(BijakTransaction.processed_at.desc().nullsfirst())
         )
 
@@ -674,11 +741,7 @@ def process_pjpur_tag_transactions():
                 (PjpurTagTransaction.processed_at != None) & (PjpurTagTransaction.processed_at >= hour_ago)
             )
             .filter(TransactionDetail.machine_id.in_(allowed_machine_ids))  # Apply machine filter
-            .filter(
-                ~db.query(Log)
-                .filter(Log.cdt_trx_cdm_id == TransactionDetail.id)
-                .exists()
-            )  # More efficient check for large Log tables
+            .filter(is_transfer_eligible(db, TransactionDetail.id))
             .order_by(PjpurTagTransaction.processed_at.desc().nullsfirst())  # Order by processed_at descending, nulls first
         )
         

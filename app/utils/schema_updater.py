@@ -19,7 +19,7 @@ from app.models import VALog
 logger = logging.getLogger(__name__)
 
 # Schema version to track changes
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 
 def ensure_log_columns_exist():
     """
@@ -48,7 +48,8 @@ def ensure_log_columns_exist():
             # Transaction fee fields
             "deduction_amount": "FLOAT",
             "final_amount": "FLOAT",
-            "amount": "FLOAT"
+            "amount": "FLOAT",
+            "retry_count": "INTEGER",
         }
         
         # Get existing columns in the table

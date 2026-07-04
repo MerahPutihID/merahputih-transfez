@@ -33,6 +33,10 @@ class BaseConfig(BaseSettings):
     ENABLE_NAK_QUEUE_PROCESSING: bool = True
     # Bijak COMPLETED deposit → local transfer (additional trigger for PJPUR Bijak machines).
     ENABLE_BIJAK_TRANSFER_PROCESSING: bool = True
+
+    # Failed local transfer retry (gateway log status FAILED)
+    MAX_TRANSFER_RETRY_COUNT: int = 3
+    TRANSFER_RETRY_INTERVAL_MINUTES: int = 5
     
     # Machine Filter Configuration
     MAINTENANCE_ID: str  # REQUIRED: Filter transactions by specific maintenance_id
