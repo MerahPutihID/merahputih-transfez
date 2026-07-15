@@ -99,15 +99,6 @@ class CreateVARequest(BaseModel):
         examples=["http://localhost:8001/va/callback/251014-0001"],
     )
 
-
-class VACallbackResponse(BaseModel):
-    status: str
-    message: str
-    id: UUID
-    va_status: Optional[str] = None
-    va_number: Optional[str] = None
-    partner_trx_id: Optional[str] = None
-
     @model_validator(mode="after")
     def validate_business_rules(self):
         if self.is_open and self.amount != 0:
@@ -120,6 +111,15 @@ class VACallbackResponse(BaseModel):
             raise ValueError("trx_expiration_time must be lower than expiration_time")
 
         return self
+
+
+class VACallbackResponse(BaseModel):
+    status: str
+    message: str
+    id: UUID
+    va_status: Optional[str] = None
+    va_number: Optional[str] = None
+    partner_trx_id: Optional[str] = None
 
 class SenderResponse(BaseModel):
     firstname: str
