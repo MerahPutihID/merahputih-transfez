@@ -11,7 +11,8 @@ class EnvironmentType(str, Enum):
 class BaseConfig(BaseSettings):
     model_config = ConfigDict(
         env_file=".env",
-        case_sensitive=True
+        case_sensitive=True,
+        extra='allow',
     )
     
     LOG_LEVEL: str = "INFO"
@@ -33,6 +34,12 @@ class BaseConfig(BaseSettings):
     ENABLE_NAK_QUEUE_PROCESSING: bool = True
     # Bijak COMPLETED deposit → local transfer (additional trigger for PJPUR Bijak machines).
     ENABLE_BIJAK_TRANSFER_PROCESSING: bool = True
+
+    # Bank inquiry (Jack API) settings
+    ENABLE_BANK_INQUIRY_PROCESSING: bool = False
+    JACK_API_BASE_URL: str = "https://staging.api.disbursement.transfez.tech"
+    JACK_API_KEY: str = ""
+    JACK_INQUIRY_POLL_INTERVAL_SECONDS: int = 30
 
     # Failed local transfer retry (gateway log status FAILED)
     MAX_TRANSFER_RETRY_COUNT: int = 3
