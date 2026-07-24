@@ -26,6 +26,9 @@ from app.constants import TRANSACTION_STATUS
 from app.config import settings
 from app.utils.transaction_splitter import prepare_split_transactions, generate_split_reference_ids
 from app.utils.va_lookup import get_va_number_by_machine_id
+from app.services.jack_api import validate_bank_account
+from app.models import BeneficiaryAccountTemp, JackBankInquiryLog
+from uuid import uuid4
 
 # Configure logging
 logging.basicConfig(
@@ -756,6 +759,93 @@ def process_pjpur_tag_transactions():
         logger.info("PJPUR TAG Transaction processing completed. Processed %s items in %.2f seconds", processed_count, duration)
         db.close()
 
+def process_beneficiary_bank_inquiry():
+    """Validate unverified beneficiary accounts via Jack API."""
+    start_time = datetime.now()
+    db = next(get_db())
+    logger.info("Processing beneficiary bank inquiry at %s", start_time)
+    processed_count = 0
+
+    try:
+        rows = (
+            db.query(BeneficiaryAccountTemp, Bank.code)
+            .join(Bank, BeneficiaryAccountTemp.bank_id == Bank.id)
+            .filter(
+                or_(
+                    BeneficiaryAccountTemp.validated_bank.is_(None),
+                    BeneficiaryAccountTemp.validated_bank == "false",
+                    BeneficiaryAccountTemp.validated_bank == False,
+                ),
+                BeneficiaryAccountTemp.account_name_bank.is_(None),
+                BeneficiaryAccountTemp.inquiry_key.is_(None),
+            )
+            .limit(10)
+            .all()
+        )
+
+        for temp, bank_code in rows:
+            processed_count += 1
+            inquiry_key = str(uuid4())
+
+            # Mark inquiry in progress
+            temp.inquiry_key = inquiry_key
+            temp.updated_on = datetime.now()
+            db.commit()
+
+            # Call Jack API
+            result = validate_bank_account(bank_code, temp.account_number)
+            request_json = json.dumps(
+                {"bank_name": bank_code, "account_number": temp.account_number},
+                cls=UUIDEncoder,
+            )
+            response_json = json.dumps(result.get("raw") or result, cls=UUIDEncoder)
+
+            # Insert audit log
+            log_entry = JackBankInquiryLog(
+                cdt_beneficiary_account_id=temp.id,
+                inquiry_key=inquiry_key,
+                status=result["status"],
+                create_request=request_json,
+                create_response=response_json,
+            )
+            db.add(log_entry)
+
+            if result["status"] == "success":
+                temp.account_name_bank = result["account_name"]
+                temp.validated_bank = "true"
+                temp.validated_bank_on = datetime.now()
+                temp.error_code = None
+                temp.error_response = None
+                temp.status = "verified"
+            else:
+                temp.error_code = result.get("error_code")
+                temp.error_response = result.get("error_response")
+                temp.status = "failed"
+
+            temp.updated_on = datetime.now()
+            db.commit()
+
+            logger.info(
+                "Bank inquiry %s: id=%s key=%s status=%s",
+                inquiry_key,
+                temp.id,
+                inquiry_key,
+                result["status"],
+            )
+
+    except Exception as e:
+        logger.error("Bank inquiry processing error: %s", e)
+        db.rollback()
+    finally:
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            "Bank inquiry processing completed. Processed %s items in %.2f seconds",
+            processed_count,
+            duration,
+        )
+        db.close()
+
+
 def run_scheduler():
     """Run the background scheduler."""
     logger.info("Starting the scheduler...")
@@ -770,6 +860,17 @@ def run_scheduler():
 
     scheduler.add_job(process_adv_transactions, "interval", seconds=10)
     scheduler.add_job(process_pjpur_tag_transactions, "interval", seconds=10)
+
+    if settings.ENABLE_BANK_INQUIRY_PROCESSING:
+        interval = settings.JACK_INQUIRY_POLL_INTERVAL_SECONDS
+        scheduler.add_job(process_beneficiary_bank_inquiry, "interval", seconds=interval)
+        logger.info(
+            "Bank inquiry processing enabled (interval=%ss, cdt_beneficiary_account_temp → Jack API)",
+            interval,
+        )
+    else:
+        logger.info("Bank inquiry processing disabled")
+
     scheduler.start()
     try:
         while True:

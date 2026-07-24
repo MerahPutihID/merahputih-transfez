@@ -174,6 +174,63 @@ class MachineVirtualAccount(Base):
     va_number = Column(String(50))
 
 
+class BeneficiaryAccountTemp(Base):
+    """Temp beneficiary accounts awaiting bank validation (managed by this service)."""
+
+    __tablename__ = "cdt_beneficiary_account_temp"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    created_by = Column(String(255))
+    created_on = Column(DateTime(6))
+    deleted_at = Column(DateTime(6))
+    updated_by = Column(String(255))
+    updated_on = Column(DateTime(6))
+    account_name = Column(String(255))
+    account_number = Column(String(255))
+    firstname = Column(String(255))
+    lastname = Column(String(255))
+    account_type = Column(String(255))
+    bank_id = Column(UUID(as_uuid=True))
+    branch_id = Column(UUID(as_uuid=True))
+    country_code = Column(String(255))
+    customer_id = Column(UUID(as_uuid=True))
+    customer_status = Column(String(255))
+    customer_type = Column(String(255))
+    cr_code_id = Column(UUID(as_uuid=True))
+    region_code = Column(String(255))
+    validated_bank = Column(String(16))  #  'true' | 'false' | NULL
+    validated_bank_on = Column(DateTime)
+    validated_mp = Column(String(16))
+    validated_mp_on = Column(DateTime)
+    validated_mp_by = Column(String(100))
+    request_approval = Column(String(16))
+    request_approval_on = Column(DateTime)
+    request_approval_by = Column(String(100))
+    account_number_bank = Column(String(255))
+    account_name_bank = Column(String(255))
+    inquiry_key = Column(String(255))
+    error_code = Column(String(255))
+    error_response = Column(String(255))
+    status = Column(String(255))
+
+
+class JackBankInquiryLog(Base):
+    """Audit log for Jack /validation_bank_account API calls."""
+
+    __tablename__ = "jack_transaction_bank_inquiry_log"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    cdt_beneficiary_account_id = Column(UUID(as_uuid=True), index=True)
+    inquiry_key = Column(String(255), index=True)
+    status = Column(String)
+    create_request = Column(Text)
+    create_response = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class Bank(Base):
     __tablename__ = "cdt_bank"
     __table_args__ = {'extend_existing': True}
