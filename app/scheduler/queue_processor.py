@@ -4,7 +4,8 @@ import string
 import random
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import cast, String, desc, or_, func
-from datetime import datetime, timedelta
+from sqlalchemy import and_, or_
+from datetime import datetime, timedelta, timezone
 
 from app.database import get_db
 from app.models import (
@@ -22,6 +23,7 @@ from app.models import (
 from app.services import create_transaction, confirm_transaction  # Import the functions directly
 from app.utils import UUIDEncoder
 from app.utils import calculate_transaction_fee  # Import the function directly
+from app.utils import record_commissions
 from app.constants import TRANSACTION_STATUS
 from app.config import settings
 from app.utils.transaction_splitter import prepare_split_transactions, generate_split_reference_ids
@@ -51,43 +53,45 @@ def generate_random_string(length=6):
 
 def get_allowed_machine_ids(db):
     """
-    Get list of machine IDs that should be processed based on maintenance_id configuration
-    This filter is MANDATORY - processing only occurs for machines with the specified maintenance_id
-    
+    Get list of machine IDs that should be processed based on payment_gateway_id configuration
+    This filter is MANDATORY - processing only occurs for machines with the specified payment_gateway_id
+
     Args:
         db: Database session
-        
+
     Returns:
         list: List of allowed machine IDs (UUIDs), or empty list if none found
-        
+
     Raises:
-        ValueError: If MAINTENANCE_ID is not configured
+        ValueError: If PAYMENT_GATEWAY_ID is not configured
     """
     if not settings.MAINTENANCE_ID or not CDTMachine:
-        raise ValueError("MAINTENANCE_ID configuration is required but not set")
-    
+        raise ValueError("PAYMENT_GATEWAY_ID configuration is required but not set")
+
     try:
         # Convert string UUID to UUID object for comparison
         from uuid import UUID
         maintenance_uuid = UUID(settings.MAINTENANCE_ID)
-        
+
         # Query machines with the specified maintenance_id
         machines = db.query(CDTMachine.id).filter(
-            CDTMachine.maintenance_id == maintenance_uuid
+            # CDTMachine.maintenance_id == maintenance_uuid,
+            CDTMachine.payment_gateway_id == maintenance_uuid,
+            CDTMachine.is_direct == False
         ).all()
-        
+
         machine_ids = [machine.id for machine in machines]
-        
+
         if machine_ids:
-            logger.info(f"Processing transactions for {len(machine_ids)} machines with maintenance_id: {settings.MAINTENANCE_ID}")
+            logger.info(f"Processing transactions for {len(machine_ids)} machines with payment_gateway_id: {settings.MAINTENANCE_ID}")
         else:
-            logger.warning(f"No machines found with maintenance_id: {settings.MAINTENANCE_ID} - no transactions will be processed")
-            
+            logger.warning(f"No machines found with payment_gateway_id: {settings.MAINTENANCE_ID} - no transactions will be processed")
+
         return machine_ids
-        
+
     except Exception as e:
-        logger.error(f"Error getting machine IDs for maintenance_id {settings.MAINTENANCE_ID}: {str(e)}")
-        raise ValueError(f"Failed to get machine IDs for maintenance_id {settings.MAINTENANCE_ID}: {str(e)}")
+        logger.error(f"Error getting machine IDs for payment_gateway_id {settings.MAINTENANCE_ID}: {str(e)}")
+        raise ValueError(f"Failed to get machine IDs for payment_gateway_id {settings.MAINTENANCE_ID}: {str(e)}")
 
 
 def _parent_log_filter(cdt_trx_cdm_id_column):
@@ -183,6 +187,9 @@ def _prepare_transfer_log(db, transaction_id, reference_id, trx_detail, log_pref
         split_total=0,
         original_amount=initial_amount,
         deduction_amount=0.0,
+        deduction_amount_pre=0.0,
+        vat=0.0,
+        vat_amount=0.0,
         final_amount=0.0,
         amount=initial_amount,
         parent_reference_id=None,
@@ -203,7 +210,7 @@ def _process_transaction_common(
     attach_va_to_notes=False,
 ):
     """Common transaction processing logic used by both queue and advanced transaction processors.
-    
+
     This function:
     1. Creates a parent log entry for the transaction
     2. Calculates transaction fee based on customer tier
@@ -215,7 +222,7 @@ def _process_transaction_common(
        - Processes as single transaction
     5. Creates API requests for each split transaction
     6. Updates parent log with final status based on split results
-    
+
     Args:
         db: Database session
         trx_detail: Transaction detail object
@@ -225,7 +232,7 @@ def _process_transaction_common(
         item_id: Optional item ID for logging purposes
         attach_va_to_notes: Bijak flow only — attach machine VA to notes and omit
             balance_id / transfer_service_code from Transfez payload.
-        
+
     Returns:
         bool: True if processing was successful, False otherwise
     """
@@ -273,7 +280,7 @@ def _process_transaction_common(
         else:
             transaction_notes = settings.NOTES
             logger.debug("%sUsing default NOTES (no VA attachment)", log_prefix)
-            
+
         # Get the transaction amount
         try:
             amount = float(trx_detail.amount)
@@ -282,23 +289,31 @@ def _process_transaction_common(
             processing_log.original_amount = amount
         except (ValueError, TypeError):
             raise ValueError(f"Invalid amount format: {trx_detail.amount}")
-        
+
         # Calculate transaction fee based on customer_id
-        deduction_amount, final_amount = calculate_transaction_fee(
+        fee_result = calculate_transaction_fee(
             beneficiary_data.customer_id,
             amount
         )
-        
+        deduction_amount = fee_result["deduction_amount"]
+        final_amount = fee_result["final_amount"]
+
         # Update the log with fee information
         processing_log.deduction_amount = deduction_amount
+        processing_log.deduction_amount_pre = fee_result["deduction_amount_pre"]
+        processing_log.vat = fee_result["vat"]
+        processing_log.vat_amount = fee_result["vat_amount"]
         processing_log.final_amount = final_amount
         db.commit()
-        
+
         logger.info(f"{log_prefix}Transaction fee: {deduction_amount}, Final amount: {final_amount}")
-        
+
+        # Snapshot the commission hierarchy for this transaction (idempotent, never blocks the transfer)
+        record_commissions(db, transaction_id)
+
         # Check if the amount exceeds the maximum transaction amount
         max_amount = float(settings.MAX_TRANSACTION_AMOUNT)
-        
+
         # Prepare transaction data for the API call
         transaction_data = {
             'callback_url_base': f"{settings.API_BASE_URL}/callback/",
@@ -314,11 +329,11 @@ def _process_transaction_common(
                 'account': beneficiary_data.account_number
             }
         }
-        
+
         # Only split transactions for BI-Fast (TRANSFER_SERVICE_CODE = 1)
         # Also check if the amount exceeds the maximum transaction amount
         transfer_service_code = int(settings.TRANSFER_SERVICE_CODE)
-        
+
         if transfer_service_code == 1 and final_amount > max_amount:
             # Split the amount AFTER fee deduction
             # This ensures all amounts sent are after the fee has been applied
@@ -328,11 +343,11 @@ def _process_transaction_common(
                 max_amount=max_amount,
                 **transaction_data
             )
-            
+
             # Update parent log with split total
             processing_log.split_total = len(split_transactions)
             db.commit()
-            
+
             logger.info(f"{log_prefix}Transaction will be processed in {len(split_transactions)} part(s)")
         else:
             # For non BI-Fast transactions or if amount is below max, don't split
@@ -347,22 +362,22 @@ def _process_transaction_common(
                 'original_amount': amount,
                 'parent_reference_id': reference_id
             }]
-            
+
             # Update parent log with split total
             processing_log.split_total = 1
             db.commit()
-            
+
             logger.info(f"{log_prefix}Transaction will be processed as a single transaction")
-        
+
         # Process each split transaction
         successful_splits = 0
-        
+
         for split_tx in split_transactions:
             split_reference_id = split_tx['reference_id']
             split_amount = split_tx['amount']
             split_number = split_tx.get('split_number', 1)
             split_total = split_tx.get('split_total', 1)
-            
+
             # Always create a split log entry for consistency
             # This matches our transaction_splitter logic that always creates split structure
             split_log = Log(
@@ -381,18 +396,24 @@ def _process_transaction_common(
                 # Initially set all fee and amount fields
                 # These will be updated for fee-bearing splits later
                 deduction_amount=float(0.0),  # Initially set to 0, will update for fee-bearing splits
+                deduction_amount_pre=float(0.0),
+                vat=float(0.0),
+                vat_amount=float(0.0),
                 amount=float(split_amount),    # Initial split amount - for fee-bearing splits, will be updated
                 final_amount=float(split_amount)  # Initially same as amount - for fee-bearing splits, will reflect post-fee
             )
             db.add(split_log)
             db.commit()
             processing_log = split_log
-            
+
             # For BI-Fast transactions with multiple splits, apply the fee to the last split
             if transfer_service_code == 1 and split_total > 1 and split_number == split_total:
                 # This is the last split, apply the fee tracking here for reporting purposes
                 processing_log.deduction_amount = float(deduction_amount)
-                
+                processing_log.deduction_amount_pre = float(fee_result["deduction_amount_pre"])
+                processing_log.vat = float(fee_result["vat"])
+                processing_log.vat_amount = float(fee_result["vat_amount"])
+
                 # For the last split with fee, we need to:
                 # - Keep amount as the original split amount before fee
                 # - Set final_amount as the amount after fee deduction
@@ -405,15 +426,18 @@ def _process_transaction_common(
             elif split_total == 1:
                 # For single transactions, apply fee to the only split
                 processing_log.deduction_amount = float(deduction_amount)
+                processing_log.deduction_amount_pre = float(fee_result["deduction_amount_pre"])
+                processing_log.vat = float(fee_result["vat"])
+                processing_log.vat_amount = float(fee_result["vat_amount"])
                 # Ensure correct amount reporting - amount should be original (before deduction)
                 original_amount = float(split_amount) + float(deduction_amount)
-                processing_log.amount = original_amount  
+                processing_log.amount = original_amount
                 processing_log.final_amount = float(split_amount)
                 db.commit()
                 logger.info(f"Applied deduction fee {deduction_amount} to single transaction (original amount: {original_amount}, final amount: {split_amount})")
-            
+
             logger.info(f"Processing {log_prefix}split {split_number}/{split_total}: {split_reference_id} with amount {split_amount}")
-            
+
             # Send request to 3rd-party API with transaction details
             # Amount has already been adjusted for fee deduction
             response = create_transaction(
@@ -433,7 +457,7 @@ def _process_transaction_common(
             # Update the log amount fields only for splits without fee applied
             # For splits with fee, we've already set these values correctly above
             if not (
-                (transfer_service_code == 1 and split_total > 1 and split_number == split_total) or 
+                (transfer_service_code == 1 and split_total > 1 and split_number == split_total) or
                 (split_total == 1)
             ):
                 # For non-fee splits, amount and final_amount are the same
@@ -456,11 +480,11 @@ def _process_transaction_common(
 
                 # Attempt to confirm the transaction
                 confirm_response = confirm_transaction(response["transaction_id"])
-                
+
                 # Update the log with confirm response
                 processing_log.state = confirm_response.get("state", None)
                 processing_log.confirm_response = json.dumps(confirm_response, cls=UUIDEncoder)
-                
+
                 if confirm_response.get("status") == "success":
                     processing_log.status = TRANSACTION_STATUS["CONFIRMED"]
                     successful_splits += 1
@@ -473,14 +497,14 @@ def _process_transaction_common(
                 processing_log.create_response = json.dumps(response, cls=UUIDEncoder)
 
             db.commit()
-        
+
         # Always update the parent log status based on the split transaction results
         # Since all transactions now use the split structure, including single-split transactions
         if processing_log.parent_reference_id:
             parent_log = db.query(Log).filter(
                 Log.reference_id == processing_log.parent_reference_id
             ).first()
-            
+
             if parent_log:
                 if successful_splits == len(split_transactions):
                     parent_log.status = TRANSACTION_STATUS["CONFIRMED"]
@@ -491,7 +515,7 @@ def _process_transaction_common(
                 else:
                     parent_log.status = TRANSACTION_STATUS["FAILED"]
                     parent_log.state = "split_all_failed"
-                
+
                 parent_log.create_response = json.dumps({
                     "message": f"Split {log_prefix}transaction processing completed with {successful_splits}/{len(split_transactions)} successful splits",
                     "timestamp": datetime.now().isoformat()
@@ -515,7 +539,7 @@ def _process_transaction_common(
                 safe_amount = float(trx_detail.amount) if trx_detail else 0.0
             except (ValueError, TypeError, AttributeError):
                 safe_amount = 0.0
-                
+
             # Create a new log entry if one doesn't exist
             processing_log = Log(
                 cdt_trx_cdm_id=transaction_id,
@@ -530,6 +554,9 @@ def _process_transaction_common(
                 confirm_response=None,
                 callback_data=None,
                 deduction_amount=0.0,  # Set default values for fee fields as float
+                deduction_amount_pre=0.0,
+                vat=0.0,
+                vat_amount=0.0,
                 final_amount=0.0,
                 amount=safe_amount,  # Use safe amount value
                 split_number=0,
@@ -540,7 +567,7 @@ def _process_transaction_common(
             )
             db.add(processing_log)
         db.commit()
-        
+
         if item_id:
             logger.error(f"Error processing {log_prefix}item {item_id}: {e}")
         return False
@@ -554,19 +581,19 @@ def process_queue():
     try:
         # Calculate timestamp based on configured threshold
         hour_ago = datetime.now() - timedelta(hours=settings.QUEUE_PROCESSING_TIME_THRESHOLD_HOURS)
-        
+
         # Get allowed machine IDs based on maintenance_id configuration (MANDATORY)
         try:
             allowed_machine_ids = get_allowed_machine_ids(db)
         except ValueError as e:
             logger.error(f"Queue processing skipped: {str(e)}")
             return
-        
+
         # Skip processing if no machines found
         if not allowed_machine_ids:
             logger.info("No machines found with configured maintenance_id - skipping queue processing")
             return
-        
+
         # Use a correlated subquery with EXISTS instead of IN to handle large Log tables
         # This approach is more efficient when the Log table contains a lot of data
         pending_transactions = (
@@ -605,20 +632,20 @@ def process_adv_transactions():
     processed_count = 0
     try:
         # Calculate timestamp based on configured threshold
-        hour_ago = datetime.now() - timedelta(hours=settings.QUEUE_PROCESSING_TIME_THRESHOLD_HOURS)
-        
+        hour_ago = datetime.now(timezone.utc) - timedelta(hours=settings.QUEUE_PROCESSING_TIME_THRESHOLD_HOURS)
+
         # Get allowed machine IDs based on maintenance_id configuration (MANDATORY)
         try:
             allowed_machine_ids = get_allowed_machine_ids(db)
         except ValueError as e:
             logger.error(f"ADV transaction processing skipped: {str(e)}")
             return
-        
+
         # Skip processing if no machines found
         if not allowed_machine_ids:
             logger.info("No machines found with configured maintenance_id - skipping ADV processing")
             return
-        
+
         # Use a correlated subquery with EXISTS instead of IN to handle large Log tables
         # This approach is more efficient when the Log table contains a lot of data
         pending_transactions = (
@@ -638,7 +665,7 @@ def process_adv_transactions():
             .filter(is_transfer_eligible(db, TransactionDetail.id))
             .order_by(CDTAdvTransaction.processed_at.desc().nullsfirst())  # Order by processed_at descending, nulls first
         )
-        
+
         # Fetch and process transactions
         for adv_transaction, trx_detail in pending_transactions:
             reference_id = adv_transaction.reference_id
@@ -657,7 +684,7 @@ def process_bijak_transactions():
     logger.info("Processing Bijak Transactions at %s", start_time)
     processed_count = 0
     try:
-        hour_ago = datetime.now() - timedelta(hours=settings.QUEUE_PROCESSING_TIME_THRESHOLD_HOURS)
+        hour_ago = datetime.now(timezone.utc) - timedelta(hours=settings.QUEUE_PROCESSING_TIME_THRESHOLD_HOURS)
 
         try:
             allowed_machine_ids = get_allowed_machine_ids(db)
@@ -683,6 +710,9 @@ def process_bijak_transactions():
             .filter(is_transfer_eligible(db, TransactionDetail.id))
             .order_by(BijakTransaction.processed_at.desc().nullsfirst())
         )
+        # logger.info("Hour ago timestamp for filtering: %s", hour_ago)
+        # logger.info("Machine IDs allowed for Bijak processing: %s", allowed_machine_ids)
+        logger.info("Found %s pending Bijak transactions to process", pending_transactions.count())
 
         for bijak_transaction, trx_detail in pending_transactions:
             reference_id = bijak_transaction.reference_id
@@ -715,20 +745,20 @@ def process_pjpur_tag_transactions():
     processed_count = 0
     try:
         # Calculate timestamp based on configured threshold
-        hour_ago = datetime.now() - timedelta(hours=settings.QUEUE_PROCESSING_TIME_THRESHOLD_HOURS)
-        
+        hour_ago = datetime.now(timezone.utc) - timedelta(hours=settings.QUEUE_PROCESSING_TIME_THRESHOLD_HOURS)
+
         # Get allowed machine IDs based on maintenance_id configuration (MANDATORY)
         try:
             allowed_machine_ids = get_allowed_machine_ids(db)
         except ValueError as e:
             logger.error(f"PJPUR transaction processing skipped: {str(e)}")
             return
-        
+
         # Skip processing if no machines found
         if not allowed_machine_ids:
             logger.info("No machines found with configured maintenance_id - skipping PJPUR processing")
             return
-        
+
         # Use a correlated subquery with EXISTS instead of IN to handle large Log tables
         # This approach is more efficient when the Log table contains a lot of data
         pending_transactions = (
@@ -747,7 +777,7 @@ def process_pjpur_tag_transactions():
             .filter(is_transfer_eligible(db, TransactionDetail.id))
             .order_by(PjpurTagTransaction.processed_at.desc().nullsfirst())  # Order by processed_at descending, nulls first
         )
-        
+
         # Fetch and process transactions
         for pjpur_tag_transaction, trx_detail in pending_transactions:
             reference_id = pjpur_tag_transaction.reference_id

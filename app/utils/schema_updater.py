@@ -14,12 +14,12 @@ from sqlalchemy import inspect, text, create_engine
 from sqlalchemy.sql import func
 from app.database import get_db, engine
 from app.config import settings
-from app.models import VALog, JackBankInquiryLog
+from app.models import VALog, JackBankInquiryLog, Commission
 
 logger = logging.getLogger(__name__)
 
 # Schema version to track changes
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 
 def ensure_log_columns_exist():
     """
@@ -47,6 +47,9 @@ def ensure_log_columns_exist():
             
             # Transaction fee fields
             "deduction_amount": "FLOAT",
+            "deduction_amount_pre": "FLOAT",
+            "vat": "FLOAT",
+            "vat_amount": "FLOAT",
             "final_amount": "FLOAT",
             "amount": "FLOAT",
             "retry_count": "INTEGER",
@@ -135,6 +138,19 @@ def ensure_jack_inquiry_log_table_exists() -> bool:
     return True
 
 
+def ensure_commission_table_exists() -> bool:
+    """Create cdt_commision in public schema if it does not exist."""
+    table_name = Commission.__tablename__
+    inspector = inspect(engine)
+    if table_name in inspector.get_table_names(schema="public"):
+        logger.info("Table %s already exists in schema public.", table_name)
+        return False
+
+    logger.info("Creating table %s in schema public...", table_name)
+    Commission.__table__.create(bind=engine, checkfirst=True)
+    logger.info("Successfully created table %s.", table_name)
+    return True
+
 def update_all_schemas():
     """
     Main function to update schemas managed by this service (Log columns + VA log table).
@@ -148,15 +164,16 @@ def update_all_schemas():
         
         va_table_created = ensure_va_callback_log_table_exists()
         jack_table_created = ensure_jack_inquiry_log_table_exists()
+        commission_table_created = ensure_commission_table_exists()
         log_updates = ensure_log_columns_exist()
 
         logger.info(
-            "Managed schemas: cdt_gateway_transaction_log (columns), cdt_va_callback_log (table), jack_transaction_bank_inquiry_log (table)"
+            "Managed schemas: cdt_gateway_transaction_log (columns), cdt_va_callback_log (table), jack_transaction_bank_inquiry_log (table), cdt_commision (table)"
         )
 
         # Log schema update completion
         success_message = "Schema update completed successfully"
-        if log_updates or va_table_created or jack_table_created:
+        if log_updates or va_table_created or jack_table_created or commission_table_created:
             success_message += " with changes"
         else:
             success_message += " (no changes needed)"

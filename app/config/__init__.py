@@ -41,9 +41,6 @@ def get_settings():
 # Export what you need
 __all__ = ['BaseConfig', 'get_settings', 'clear_environment']
 
-# Clear environment variables
-clear_environment()
-
 # Clear settings cache and get fresh settings
 get_settings.cache_clear()
 settings = get_settings()

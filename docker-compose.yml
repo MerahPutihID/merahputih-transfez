@@ -12,7 +12,6 @@ services:
     environment:
       - APP_ENV=development
       - MODE=api
-      - DATABASE_URL=postgresql://dm_user:dm_user@db_postgres:5432/dev_app_bmps
     env_file:
       - .env
     volumes:
@@ -34,7 +33,6 @@ services:
     environment:
       - APP_ENV=development
       - MODE=scheduler
-      - DATABASE_URL=postgresql://dm_user:dm_user@db_postgres:5432/dev_app_bmps
     env_file:
       - .env
     volumes:

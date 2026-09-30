@@ -1,6 +1,6 @@
 import uuid
 import json
-from sqlalchemy import Column, Integer, String, Text, DateTime, Date, Time, UUID, ForeignKey, Float, JSON
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, Date, Time, UUID, ForeignKey, Float, JSON, Numeric
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -34,17 +34,20 @@ class CDTMachine(Base):
     """Reference model for cdt_machine table (managed externally)"""
     __tablename__ = "cdt_machine"
     __table_args__ = {'extend_existing': True}
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     code = Column(String(255), unique=True, index=True)
     description = Column(String(255))
     name = Column(String(255))
     maintenance_id = Column(UUID(as_uuid=True), nullable=True)
+    payment_gateway_id = Column(UUID(as_uuid=True), nullable=True)
+    is_direct = Column(Boolean, nullable=True)
+    direct_type = Column(String(30), nullable=True)
 
 class Log(Base):
     __tablename__ = "cdt_gateway_transaction_log"
     __table_args__ = {'extend_existing': True}
-    
+
     # This is the only model actively managed by this service's schema updater
     # All other models are managed by external services
 
@@ -64,7 +67,10 @@ class Log(Base):
     original_amount = Column(Float, nullable=True)  # Original amount before splitting
     parent_reference_id = Column(String(255), nullable=True)  # Original reference ID for split transactions
     # Transaction fee fields
-    deduction_amount = Column(Float, nullable=True)  # Transaction fee amount
+    deduction_amount = Column(Float, nullable=True)  # Transaction fee amount (base fee + VAT)
+    deduction_amount_pre = Column(Float, nullable=True)  # Base tier fee before VAT
+    vat = Column(Float, nullable=True)  # VAT percentage from tier_rules
+    vat_amount = Column(Float, nullable=True)  # Computed VAT on the base fee
     final_amount = Column(Float, nullable=True)  # Final amount after deduction
     amount = Column(Float, nullable=True)  # Original amount for this specific request to 3rd-party
     retry_count = Column(Integer, nullable=True, default=0)  # Failed transfer retry attempts
@@ -99,7 +105,7 @@ class TransactionDetail(Base):
     id = Column(UUID(as_uuid=True), primary_key=True)
     created_on = Column(DateTime(6))
     updated_on = Column(DateTime(6))
-    
+
     amount = Column(String(255), nullable=False)
     cdm_trx_date = Column(Date)
     cdm_trx_datetime = Column(DateTime(6))
@@ -110,7 +116,7 @@ class TransactionDetail(Base):
     signature = Column(String(255))
     status = Column(String(255))
     token = Column(String(255))
-    
+
     beneficiary_account_id = Column(UUID(as_uuid=True))
     code_id = Column(UUID(as_uuid=True))
     machine_id = Column(UUID(as_uuid=True))
@@ -231,6 +237,21 @@ class JackBankInquiryLog(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class Commission(Base):
+    """Per-transaction commission snapshot from the customer hierarchy (managed by this service)."""
+
+    __tablename__ = "cdt_commision"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    cdt_trx_cdm_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    customer_id = Column(UUID(as_uuid=True), nullable=False)
+    commission_type = Column(String(50), nullable=False)
+    commission_rate = Column(Numeric(5, 2))
+    rate_type = Column(String(50))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
 class Bank(Base):
     __tablename__ = "cdt_bank"
     __table_args__ = {'extend_existing': True}
@@ -266,7 +287,7 @@ class CDTAdvTransaction(Base):
     processed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
+
     # Virtual relationship to TransactionDetail based on reference_id = cdm_trx_no
     transaction_detail = relationship(
         "TransactionDetail",
@@ -325,7 +346,7 @@ class PjpurTagTransaction(Base):
     error_message = Column(String(255), nullable=True)
     retry_count = Column(Integer, nullable=True)
     processed_at = Column(DateTime(timezone=True), nullable=True)
-    
+
     # Virtual relationship to TransactionDetail based on reference_id = cdm_trx_no
     transaction_detail = relationship(
         "TransactionDetail",
@@ -337,10 +358,10 @@ class PjpurTagTransaction(Base):
 class Deduction(Base):
     __tablename__ = "deductions"
     __table_args__ = {'extend_existing': True}
-    
+
     # Note: This model is managed by another service and is included here for reference.
     # Changes here should reflect the actual database structure.
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True)
     customer_id = Column(String(255), nullable=False)  # Changed from UUID to String to match actual DB type
     deduction_active_type = Column(String, nullable=False)  # PERCENT or NOMINAL
